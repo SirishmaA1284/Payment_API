@@ -24,10 +24,14 @@ One screen, one button ("RUN RECOVERY ANALYSIS"), four stages:
 2. **Investigation** — an "IBM BOB INVESTIGATION" panel plus the confirmed
    root cause, backed by the actual commit and diff that introduced the bug
    (via `GET /repository/commits/{hash}` and `GET /repository/diff/{hash}`).
-3. **Safe Repair** — the isolated repair diff, and a clear MAIN vs. SANDBOX
-   comparison making it visible that `main` was never touched.
-4. **Verification** — a before/after comparison table, labeled as
-   "CODEBASE ICU VERIFICATION" to distinguish it from Bob's own diagnosis.
+3. **Safe Repair** — the isolated repair diff, plus the sandbox's own live
+   test results (via `GET /sandbox/{sandbox_id}` and
+   `POST /sandbox/{sandbox_id}/tests`), in a clear MAIN vs. SANDBOX comparison
+   making it visible that `main` was never touched.
+4. **Verification** — a before/after comparison table built from the two
+   live test runs (`main` via `POST /tests/run`, the sandbox via
+   `POST /sandbox/{sandbox_id}/tests`), labeled as "CODEBASE ICU
+   VERIFICATION" to distinguish it from Bob's own diagnosis.
 
 ## Setup / installation
 
@@ -80,8 +84,8 @@ frontend/
 │   │   └── api.js       thin fetch wrapper around the backend - no
 │   │                     backend logic is duplicated here
 │   ├── config/
-│   │   └── demo.js       clearly-labeled facts this demo's backend has no
-│   │                     endpoint to discover live (see below)
+│   │   └── demo.js       clearly-labeled demo identifiers/configuration
+│   │                     used by the dashboard (see below)
 │   ├── utils/            pure helpers (diff parsing, failure-reason
 │   │                     parsing) with small vitest unit tests
 │   ├── App.jsx           orchestrates the "Run Recovery Analysis" flow
@@ -94,28 +98,32 @@ frontend/
 └── vite.config.js
 ```
 
-### Real data vs. demo data
+### Live data vs. configuration
 
-Nearly everything on the dashboard is fetched live from the backend at
-analysis time: repository status, the target application's test results,
-and both the root-cause and repair commits' metadata/diffs (Git worktrees
-share one object database, so the repair commit is visible to the backend's
-analyzer even though it lives on a different branch/worktree).
+Everything the dashboard displays is fetched live from the backend at
+analysis time:
 
-Two facts are **not** available through any existing backend endpoint, and
-are supplied as clearly-labeled, manually-verified constants in
-`src/config/demo.js` instead of being fabricated:
+- **Repository status** — `GET /repository/status`.
+- **Target application test results** — `POST /tests/run`.
+- **Root-cause commit metadata/diff** — `GET /repository/commits/{hash}` and
+  `GET /repository/diff/{hash}` (Git worktrees share one object database, so
+  this works even though the commit was made on a different branch/worktree
+  than the one the backend has checked out).
+- **Repair commit metadata/diff** — the same two endpoints, for the repair
+  commit.
+- **Sandbox information** — `GET /sandbox/{sandbox_id}`.
+- **Repair sandbox test results** — `POST /sandbox/{sandbox_id}/tests`, which
+  runs the target application's `pytest` suite inside that sandbox's own
+  working directory and returns the actual, current pass/fail counts. This
+  is not a stored or hard-coded value.
 
-- which branch/sandbox path IBM Bob's repair lives in (Bob created that
-  worktree directly with `git worktree`, not through the backend's
-  `SandboxManager`, so `GET /sandbox/{id}` has no record of it), and
-- the repair sandbox's "after" test count (`11 passed / 0 failed`) — the
-  backend's `POST /tests/run` always runs against its own configured target
-  repository, so it has no endpoint to execute tests against an arbitrary
-  external path on demand.
-
-Both are called out explicitly in the UI (e.g. the Verification panel's
-footnote) rather than presented as live data.
+`src/config/demo.js` holds only **identifiers**, not results: which
+root-cause commit, which repair commit, and which sandbox this demonstration
+points the dashboard at. The dashboard needs these to know *what* to ask the
+backend about, since the backend has no "list everything relevant" endpoint.
+The repair sandbox itself is a Git worktree IBM Bob created directly with
+`git worktree`, checked out on its own branch and deliberately isolated from
+`main` — `main` is never modified by, or merged with, that repair.
 
 ## Demo workflow
 
@@ -124,11 +132,15 @@ Clicking **RUN RECOVERY ANALYSIS**:
 1. Checks the backend is reachable (`GET /health`) and updates the
    connection indicator.
 2. Loads repository status (`GET /repository/status`).
-3. Runs the target application's test suite (`POST /tests/run`) and renders
-   the failing tests.
+3. Runs the target application's test suite on `main` (`POST /tests/run`)
+   and renders the failing tests.
 4. Loads the root-cause commit's metadata and diff.
 5. Loads the repair commit's metadata and diff.
-6. Renders the before/after verification comparison.
+6. Loads the repair sandbox's information (`GET /sandbox/{sandbox_id}`).
+7. Runs the test suite inside that sandbox
+   (`POST /sandbox/{sandbox_id}/tests`).
+8. Renders the before/after verification comparison from the two live test
+   runs (steps 3 and 7).
 
 Each step's failure is caught independently and shown as an inline error
 banner rather than crashing the whole page.
