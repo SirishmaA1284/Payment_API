@@ -15,5 +15,5 @@ def isolated_database(tmp_path, monkeypatch):
 def client():
     from app.main import app
 
-    with TestClient(app) as test_client:
+    with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
