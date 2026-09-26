@@ -163,6 +163,16 @@ Interactive docs: `http://127.0.0.1:8000/docs`.
 
 ## Running the full stack (backend + dashboard)
 
+### One-click launcher (Windows)
+
+Double-click `start-codebase-icu.bat` at the repository root. It starts both
+the backend and the frontend, each in its own terminal window, then opens a
+short summary of the URLs. Once both windows show they're up, open
+`http://localhost:5173`. The launcher does not modify any source code — it
+only runs the same commands documented below in two separate windows.
+
+### Manual startup
+
 ```bash
 # terminal 1
 cd codebase-icu
