@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from .models import (
     CommitDetailResponse,
@@ -62,6 +63,23 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# The dashboard (Vite dev server / static build) runs on a different origin
+# than this API, so the browser needs an explicit CORS allow-list to let it
+# call these endpoints. Configurable so a non-default frontend port/host
+# still works without editing source.
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173"
+_allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get("CODEBASE_ICU_CORS_ORIGINS", _default_origins).split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
+)
+
 _sandbox_manager: Optional[SandboxManager] = None
 
 
@@ -89,6 +107,37 @@ def _get_sandbox_manager() -> SandboxManager:
     except (FileNotFoundError, GitCommandError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _sandbox_manager
+
+
+def _target_subpath_within_repo_root() -> str:
+    """Path of the target app relative to the repo root, e.g. "target-app".
+
+    A sandbox worktree mirrors the full repository at some commit, so the
+    target application lives at the same relative path inside the sandbox
+    as it does inside the main checkout - this is computed generically
+    rather than hard-coded, so it still works if the target repo path is
+    reconfigured.
+    """
+    repo_root = GitAnalyzer(TARGET_REPO_PATH).get_repo_root()
+    return os.path.relpath(TARGET_REPO_PATH, repo_root)
+
+
+def _to_test_run_response(result) -> TestRunResponse:
+    return TestRunResponse(
+        command=result.command,
+        returncode=result.returncode,
+        passed=result.passed,
+        failed=result.failed,
+        skipped=result.skipped,
+        errors=result.errors,
+        total=result.total,
+        failing_tests=[FailingTestResponse(node_id=f.node_id, reason=f.reason) for f in result.failing_tests],
+        error_tests=[FailingTestResponse(node_id=f.node_id, reason=f.reason) for f in result.error_tests],
+        duration_seconds=result.duration_seconds,
+        parsed_successfully=result.parsed_successfully,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
 
 
 @app.get("/health")
@@ -170,21 +219,7 @@ def repository_file_history(
 def run_tests(request: TestRunRequest = TestRunRequest()) -> TestRunResponse:
     runner = _get_test_runner()
     result = runner.run(extra_args=request.extra_args)
-    return TestRunResponse(
-        command=result.command,
-        returncode=result.returncode,
-        passed=result.passed,
-        failed=result.failed,
-        skipped=result.skipped,
-        errors=result.errors,
-        total=result.total,
-        failing_tests=[FailingTestResponse(node_id=f.node_id, reason=f.reason) for f in result.failing_tests],
-        error_tests=[FailingTestResponse(node_id=f.node_id, reason=f.reason) for f in result.error_tests],
-        duration_seconds=result.duration_seconds,
-        parsed_successfully=result.parsed_successfully,
-        stdout=result.stdout,
-        stderr=result.stderr,
-    )
+    return _to_test_run_response(result)
 
 
 @app.post("/sandbox/create", response_model=SandboxInfoResponse)
@@ -219,3 +254,37 @@ def delete_sandbox(sandbox_id: str) -> SandboxDeleteResponse:
     except SandboxError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return SandboxDeleteResponse(sandbox_id=sandbox_id, status="deleted")
+
+
+@app.post("/sandbox/{sandbox_id}/tests", response_model=TestRunResponse)
+def run_sandbox_tests(
+    sandbox_id: str, request: TestRunRequest = TestRunRequest()
+) -> TestRunResponse:
+    """Run the target application's test suite inside an existing sandbox.
+
+    This only ever reads the sandbox's checked-out files and runs `pytest`
+    there (cwd=sandbox path); it never runs a Git command against the
+    sandbox and never touches the main checkout, so both remain exactly as
+    they were before the call.
+    """
+    manager = _get_sandbox_manager()
+    try:
+        info = manager.get_sandbox(sandbox_id)
+    except SandboxNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    sandbox_path = Path(info.path)
+    if info.status != "ready" or not sandbox_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"sandbox '{sandbox_id}' has no working directory on disk",
+        )
+
+    try:
+        target_subpath = _target_subpath_within_repo_root()
+        runner = TestRunner((sandbox_path / target_subpath).resolve())
+    except (FileNotFoundError, GitCommandError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    result = runner.run(extra_args=request.extra_args)
+    return _to_test_run_response(result)

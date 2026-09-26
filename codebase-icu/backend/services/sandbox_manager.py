@@ -36,7 +36,10 @@ class SandboxInfo:
     branch: str
     source_commit: str
     status: str
-    created_at: str
+    # None for a sandbox this manager discovered rather than created itself
+    # (see _find_worktree_by_sandbox_id) - its actual creation time isn't
+    # known to this process.
+    created_at: Optional[str] = None
 
 
 class SandboxManager:
@@ -76,6 +79,40 @@ class SandboxManager:
         if result.returncode != 0:
             raise SandboxError(f"git command failed: {' '.join(command)}\n{result.stderr.strip()}")
         return result.stdout
+
+    def _list_git_worktrees(self) -> List[Dict[str, str]]:
+        """Parse `git worktree list --porcelain` into per-worktree dicts.
+
+        This surfaces every worktree Git knows about for the repository -
+        including ones created directly with `git worktree` outside this
+        manager (e.g. a repair sandbox IBM Bob set up by hand) - not just
+        ones this manager's own bookkeeping created.
+        """
+        raw = self._run_git(["worktree", "list", "--porcelain"])
+        worktrees: List[Dict[str, str]] = []
+        current: Dict[str, str] = {}
+        for line in raw.splitlines():
+            if not line.strip():
+                if current:
+                    worktrees.append(current)
+                    current = {}
+                continue
+            if line.startswith("worktree "):
+                current["path"] = line[len("worktree "):].strip()
+            elif line.startswith("HEAD "):
+                current["head"] = line[len("HEAD "):].strip()
+            elif line.startswith("branch "):
+                current["branch"] = line[len("branch "):].strip()
+        if current:
+            worktrees.append(current)
+        return worktrees
+
+    def _find_worktree_by_sandbox_id(self, sandbox_id: str) -> Optional[Dict[str, str]]:
+        for worktree in self._list_git_worktrees():
+            path = worktree.get("path", "")
+            if path and Path(path).name == sandbox_id:
+                return worktree
+        return None
 
     def _assert_safe_to_delete(self, path: Path) -> None:
         """Refuse to delete anything that is not a path this manager created."""
@@ -120,15 +157,41 @@ class SandboxManager:
         return info
 
     def get_sandbox(self, sandbox_id: str) -> SandboxInfo:
-        """Return current info for a sandbox, refreshing its status from disk."""
+        """Return current info for a sandbox, refreshing its status from disk.
+
+        Looks up sandboxes this manager created itself first (bookkeeping in
+        `_sandboxes`); if not found there, falls back to discovering any
+        Git worktree - created by this manager or not - whose directory name
+        matches `sandbox_id`. Discovered sandboxes are returned read-only:
+        they are never added to `_sandboxes`, so `cleanup_sandbox` (which
+        only ever looks there) can never delete a worktree this manager
+        didn't create.
+        """
         info = self._sandboxes.get(sandbox_id)
-        if info is None:
+        if info is not None:
+            status = "ready" if Path(info.path).exists() else "missing"
+            if status != info.status:
+                info = replace(info, status=status)
+                self._sandboxes[sandbox_id] = info
+            return info
+
+        worktree = self._find_worktree_by_sandbox_id(sandbox_id)
+        if worktree is None:
             raise SandboxNotFoundError(f"unknown sandbox '{sandbox_id}'")
-        status = "ready" if Path(info.path).exists() else "missing"
-        if status != info.status:
-            info = replace(info, status=status)
-            self._sandboxes[sandbox_id] = info
-        return info
+
+        path = Path(worktree.get("path", ""))
+        branch = worktree.get("branch", "")
+        if branch.startswith("refs/heads/"):
+            branch = branch[len("refs/heads/"):]
+
+        return SandboxInfo(
+            sandbox_id=sandbox_id,
+            path=str(path),
+            branch=branch or "(detached)",
+            source_commit=worktree.get("head", ""),
+            status="ready" if path.exists() else "missing",
+            created_at=None,
+        )
 
     def list_sandboxes(self) -> List[SandboxInfo]:
         return [self.get_sandbox(sandbox_id) for sandbox_id in list(self._sandboxes)]

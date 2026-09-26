@@ -78,7 +78,7 @@ class SandboxInfoResponse(BaseModel):
     branch: str
     source_commit: str
     status: str
-    created_at: str
+    created_at: Optional[str] = None
 
 
 class SandboxDeleteResponse(BaseModel):

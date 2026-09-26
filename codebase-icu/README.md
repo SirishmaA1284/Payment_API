@@ -1,4 +1,4 @@
-# Codebase ICU — Infrastructure (Block 3)
+# Codebase ICU — Infrastructure & Dashboard
 
 **Codebase ICU — Explainable Autonomous Software Recovery** is a project
 that investigates and repairs regressions in a target application, and
@@ -7,24 +7,29 @@ explains *why* the repair is correct rather than acting as a black box.
 > **IBM Bob 2.0 is the core AI reasoning component of Codebase ICU.** The
 > infrastructure in this module provides deterministic repository analysis,
 > test execution, and isolated repair environments around that AI workflow.
-> This backend does not itself perform AI reasoning, root-cause analysis,
-> or automated repair.
+> The dashboard visualizes the results of that workflow. Neither this
+> backend nor the dashboard performs AI reasoning, root-cause analysis, or
+> automated repair themselves.
 
-## Block 3 scope
+## Scope
 
-This directory (`codebase-icu/`) contains only the **deterministic
-infrastructure** the rest of the system is built on:
+This directory (`codebase-icu/`) contains two pieces:
 
-- reading Git history/diffs of the target repository,
-- running the target application's test suite and parsing the results,
-- creating and tearing down isolated sandbox copies of the repository for a
-  future repair attempt to be tried in.
+- **`backend/`** (Block 3) — the **deterministic infrastructure** the rest
+  of the system is built on: reading Git history/diffs of the target
+  repository, running the target application's test suite and parsing the
+  results, and creating/tearing down isolated sandbox copies of the
+  repository for a repair attempt to be tried in.
+- **`frontend/`** (Block 5) — the **dashboard**, a React/Vite single-page
+  app that turns the backend's evidence (plus IBM Bob's investigation and
+  repair, sourced from the shared Git history) into the visible workflow
+  Failure → Evidence → Root Cause → Safe Repair → Verified Recovery.
 
-It intentionally does **not** contain: a dashboard/frontend, an LLM
-integration, autonomous reasoning, or repair automation. Those are separate,
-later pieces of Codebase ICU. IBM Bob remains responsible for actually
+It intentionally does **not** contain: an LLM integration, autonomous
+reasoning, or repair automation. IBM Bob remains responsible for actually
 diagnosing root causes and proposing repairs; this module only gives it (and
-any future automation) safe, structured tools to do so with.
+the dashboard) safe, structured tools to do so with, and a way to show that
+work to a viewer.
 
 ## Architecture
 
@@ -54,11 +59,16 @@ Safe Sandbox        <-- codebase-icu/backend/services/sandbox_manager.py
    |
    v
 Verification         (re-run Test Runner inside the sandbox)
+   |
+   v
+Dashboard            <-- codebase-icu/frontend (this workflow, made visible)
 ```
 
-All three services are exposed over a small FastAPI backend
-(`codebase-icu/backend/main.py`) so other components (Bob, a future
-dashboard) can call them over HTTP instead of importing Python directly.
+All three backend services are exposed over a small FastAPI backend
+(`codebase-icu/backend/main.py`) so other components (Bob, the dashboard)
+can call them over HTTP instead of importing Python directly. The dashboard
+is a plain HTTP client of that API — it contains no Git, test-running, or
+sandbox logic of its own.
 
 ## Project structure
 
@@ -79,6 +89,19 @@ codebase-icu/
 │   ├── test_git_analyzer.py
 │   ├── test_test_runner.py
 │   └── test_sandbox_manager.py
+├── frontend/                    # dashboard - see frontend/README.md
+│   ├── src/
+│   │   ├── components/          # one component per dashboard panel/stage
+│   │   ├── services/api.js      # fetch wrapper around this backend
+│   │   ├── config/demo.js       # clearly-labeled, non-live demo constants
+│   │   ├── utils/                # pure helpers + vitest unit tests
+│   │   ├── App.jsx
+│   │   ├── main.jsx
+│   │   └── styles.css
+│   ├── public/
+│   ├── package.json
+│   ├── vite.config.js
+│   └── README.md
 ├── requirements.txt
 └── README.md
 ```
@@ -123,6 +146,12 @@ To point the backend at a different repository entirely, set
 `CODEBASE_ICU_TARGET_REPO` to that repository's path (or a subdirectory of
 it) before starting uvicorn.
 
+The backend also allows one cross-origin config for the dashboard:
+
+| Variable                     | Default                                              | Meaning                                   |
+|-------------------------------|-------------------------------------------------------|--------------------------------------------|
+| `CODEBASE_ICU_CORS_ORIGINS`  | `http://localhost:5173,http://127.0.0.1:5173`         | Comma-separated origins allowed to call this API from a browser (the Vite dev server's default origin). |
+
 ## Running the backend
 
 ```bash
@@ -131,6 +160,23 @@ uvicorn backend.main:app --reload
 ```
 
 Interactive docs: `http://127.0.0.1:8000/docs`.
+
+## Running the full stack (backend + dashboard)
+
+```bash
+# terminal 1
+cd codebase-icu
+uvicorn backend.main:app --reload          # http://127.0.0.1:8000
+
+# terminal 2
+cd codebase-icu/frontend
+npm install
+npm run dev                                 # http://localhost:5173
+```
+
+Open `http://localhost:5173` and click **RUN RECOVERY ANALYSIS**. See
+[`frontend/README.md`](frontend/README.md) for the dashboard's architecture,
+configuration, and demo workflow in detail.
 
 ## API endpoints
 
@@ -243,6 +289,14 @@ checks against the real `target-app` repository. Sandbox Manager tests run
 exclusively against a temporary repository — they never create a worktree
 against the real Payment API repository, so running this suite cannot
 disturb the target application or its Git history.
+
+## Running the dashboard's checks
+
+```bash
+cd codebase-icu/frontend
+npm run test    # vitest unit tests for the pure diff/test-result parsers
+npm run build   # production build - also the main JSX/import smoke test
+```
 
 ## Known limitations
 

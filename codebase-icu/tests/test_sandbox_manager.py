@@ -104,6 +104,66 @@ def test_sandbox_manager_rejects_non_git_directory(tmp_path):
         SandboxManager(not_a_repo)
 
 
+def test_get_sandbox_discovers_externally_created_worktree(temp_git_repo, sandbox_root, tmp_path):
+    """A worktree created directly with `git worktree` (not via create_sandbox,
+    mirroring how IBM Bob's repair sandbox is set up outside this API) must
+    still be discoverable and addressable by its directory name."""
+    manager = SandboxManager(temp_git_repo, sandbox_root=sandbox_root)
+
+    external_path = tmp_path / "hand-made-worktree"
+    subprocess.run(
+        [
+            "git", "-C", str(temp_git_repo), "worktree", "add",
+            "-b", "hand-made-branch", str(external_path), "HEAD",
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    try:
+        info = manager.get_sandbox(external_path.name)
+        assert info.path == str(external_path)
+        assert info.branch == "hand-made-branch"
+        assert info.status == "ready"
+        assert info.created_at is None
+    finally:
+        subprocess.run(
+            ["git", "-C", str(temp_git_repo), "worktree", "remove", "--force", str(external_path)],
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(temp_git_repo), "branch", "-D", "hand-made-branch"],
+            check=True, capture_output=True, text=True,
+        )
+
+
+def test_cleanup_cannot_delete_discovered_worktree(temp_git_repo, sandbox_root, tmp_path):
+    """Discovered (externally created) worktrees are read-only through this
+    manager: only sandboxes created via create_sandbox() can be deleted."""
+    manager = SandboxManager(temp_git_repo, sandbox_root=sandbox_root)
+
+    external_path = tmp_path / "hand-made-worktree-2"
+    subprocess.run(
+        [
+            "git", "-C", str(temp_git_repo), "worktree", "add",
+            "-b", "hand-made-branch-2", str(external_path), "HEAD",
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    try:
+        manager.get_sandbox(external_path.name)  # discover it
+        with pytest.raises(SandboxNotFoundError):
+            manager.cleanup_sandbox(external_path.name)
+        assert external_path.exists()  # cleanup must not have touched it
+    finally:
+        subprocess.run(
+            ["git", "-C", str(temp_git_repo), "worktree", "remove", "--force", str(external_path)],
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(temp_git_repo), "branch", "-D", "hand-made-branch-2"],
+            check=True, capture_output=True, text=True,
+        )
+
+
 def test_multiple_sandboxes_get_unique_ids_and_paths(temp_git_repo, sandbox_root):
     manager = SandboxManager(temp_git_repo, sandbox_root=sandbox_root)
     first = manager.create_sandbox()
