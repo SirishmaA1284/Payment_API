@@ -1,6 +1,21 @@
 from pydantic import BaseModel, Field
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class ProfileResponse(BaseModel):
+    username: str
+    display_name: str
+
+
 class PaymentCreate(BaseModel):
     amount: float = Field(..., ge=0)
     tax: float = Field(..., ge=0)
