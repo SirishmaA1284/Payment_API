@@ -32,3 +32,25 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def create_payment(amount: float, tax: float, discount: float, total: float) -> int:
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO payments (amount, tax, discount, total) VALUES (?, ?, ?, ?)",
+            (amount, tax, discount, total),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def get_payment(payment_id: int):
+    conn = get_connection()
+    try:
+        cursor = conn.execute("SELECT * FROM payments WHERE id = ?", (payment_id,))
+        return cursor.fetchone()
+    finally:
+        conn.close()

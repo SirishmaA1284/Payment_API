@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.auth import router as auth_router
 from app.database import init_db
+from app.payments import router as payments_router
 
 app = FastAPI(title="Payment API")
 
@@ -17,3 +18,4 @@ def health_check() -> dict:
 
 
 app.include_router(auth_router)
+app.include_router(payments_router)
