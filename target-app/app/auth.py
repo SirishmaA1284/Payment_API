@@ -1,12 +1,15 @@
 import base64
 import hashlib
 import hmac
+import logging
 import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from app.models import LoginRequest, LoginResponse, ProfileResponse
+
+logger = logging.getLogger(__name__)
 
 SECRET_KEY = "demo-secret-key-not-for-production"
 TOKEN_TTL_SECONDS = 3600
@@ -76,7 +79,14 @@ def get_current_user(authorization: str = Header(default=None)) -> str:
 
     try:
         return decode_token(token)
-    except Exception as exc:
+    except ExpiredTokenError as exc:
+        logger.info("Rejected expired token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+        ) from exc
+    except InvalidTokenError as exc:
+        logger.info("Rejected invalid token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",

@@ -37,3 +37,11 @@ def test_profile_with_expired_token(client):
     expired_token = create_token("demo", issued_at=0)
     response = client.get("/profile", headers={"Authorization": f"Bearer {expired_token}"})
     assert response.status_code == 401
+
+
+def test_expired_token_is_rejected_as_unauthorized(client):
+    expired_token = create_token("demo", issued_at=0)
+    response = client.get("/profile", headers={"Authorization": f"Bearer {expired_token}"})
+    assert response.status_code == 401, (
+        "An expired token must be rejected with 401 Unauthorized, not cause a server error"
+    )
