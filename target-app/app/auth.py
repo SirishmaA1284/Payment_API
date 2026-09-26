@@ -80,7 +80,7 @@ def get_current_user(authorization: str = Header(default=None)) -> str:
     try:
         return decode_token(token)
     except ExpiredTokenError as exc:
-        logger.info("Rejected expired token (age=%.0fs)", time.time() - issued_at)
+        logger.info("Rejected expired token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has expired",
