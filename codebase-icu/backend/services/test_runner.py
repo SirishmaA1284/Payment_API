@@ -6,6 +6,11 @@ vocabulary ("N passed", "N failed", "N skipped", "N error(s)") and its
 assuming any specific project's test names or counts. If parsing comes up
 empty (unexpected pytest output format, a crash before pytest even starts,
 etc.) the raw stdout/stderr is still returned so a caller can inspect it.
+
+When the suite cannot produce a usable result - no tests collected, pytest
+missing or failing to start, collection interrupted, or a timeout - the
+result carries an ``error_code``/``error`` pair describing why, instead of a
+misleading "0 passed, 0 failed".
 """
 from __future__ import annotations
 
@@ -14,7 +19,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 _SUMMARY_COUNT_RE = re.compile(
     r"(?P<count>\d+)\s+(?P<label>passed|failed|skipped|deselected|xfailed|xpassed|error|errors)\b"
@@ -22,6 +27,12 @@ _SUMMARY_COUNT_RE = re.compile(
 _FAILED_LINE_RE = re.compile(r"^FAILED (?P<nodeid>\S+?)(?: - (?P<reason>.*))?$", re.MULTILINE)
 _ERROR_LINE_RE = re.compile(r"^ERROR (?P<nodeid>\S+?)(?: - (?P<reason>.*))?$", re.MULTILINE)
 _DURATION_RE = re.compile(r"in\s+(?P<seconds>[\d.]+)\s*s\b")
+
+# pytest exit codes (https://docs.pytest.org/en/stable/reference/exit-codes.html)
+_EXIT_INTERRUPTED = 2
+_EXIT_INTERNAL_ERROR = 3
+_EXIT_USAGE_ERROR = 4
+_EXIT_NO_TESTS_COLLECTED = 5
 
 
 @dataclass
@@ -47,6 +58,8 @@ class TestRunResult:
     stdout: str
     stderr: str
     parsed_successfully: bool
+    error_code: Optional[str] = None
+    error: Optional[str] = None
 
 
 class TestRunner:
@@ -91,6 +104,8 @@ class TestRunner:
                 stdout=exc.stdout or "",
                 stderr=(exc.stderr or "") + f"\ntest run timed out after {self.timeout_seconds}s",
                 parsed_successfully=False,
+                error_code="timeout",
+                error=f"the test suite did not finish within {self.timeout_seconds}s",
             )
 
         return self._parse(command, result.returncode, result.stdout, result.stderr)
@@ -120,6 +135,7 @@ class TestRunner:
         ]
 
         total = counts["passed"] + counts["failed"] + counts["skipped"] + counts["error"]
+        error_code, error = TestRunner._classify_error(returncode, parsed_any)
 
         return TestRunResult(
             command=command,
@@ -135,4 +151,26 @@ class TestRunner:
             stdout=stdout,
             stderr=stderr,
             parsed_successfully=parsed_any,
+            error_code=error_code,
+            error=error,
         )
+
+    @staticmethod
+    def _classify_error(returncode: int, parsed_any: bool) -> Tuple[Optional[str], Optional[str]]:
+        """Explain a run that yielded no usable pass/fail result, else (None, None)."""
+        if returncode == _EXIT_NO_TESTS_COLLECTED:
+            return "no_tests", "no tests were collected; the repository has no runnable pytest suite"
+        if returncode == _EXIT_INTERRUPTED:
+            return (
+                "collection_interrupted",
+                "the test run was interrupted, usually by errors while collecting tests "
+                "(e.g. missing dependencies); see stdout/stderr",
+            )
+        if returncode in (_EXIT_INTERNAL_ERROR, _EXIT_USAGE_ERROR):
+            return "tests_could_not_run", f"pytest could not run the suite (exit code {returncode}); see stderr"
+        if returncode != 0 and not parsed_any:
+            return (
+                "tests_could_not_run",
+                f"the test command exited with code {returncode} without a pytest summary; see stderr",
+            )
+        return None, None

@@ -23,6 +23,16 @@ export default function FailurePanel({ result, loading, error }) {
     )
   }
 
+  // The backend flags runs that produced no usable result (no tests found,
+  // pytest could not start, collection errors, timeout).
+  if (result.error) {
+    return (
+      <Panel id="failure" eyebrow="STAGE 01" title="Failure" tone="danger">
+        <ErrorBanner message={`Tests could not be run: ${result.error}`} />
+      </Panel>
+    )
+  }
+
   const hasFailures = result.failed > 0
 
   return (

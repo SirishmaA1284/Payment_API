@@ -107,3 +107,28 @@ def test_run_against_real_target_app(target_app_path):
     assert result.total == result.passed + result.failed + result.skipped + result.errors
     assert result.failed >= 1
     assert any("expired" in f.node_id.lower() for f in result.failing_tests)
+
+
+def test_run_reports_no_tests_as_structured_error(tmp_path):
+    project = tmp_path / "empty-project"
+    project.mkdir()
+    result = TestRunner(project).run()
+    assert result.error_code == "no_tests"
+    assert result.error
+    assert result.total == 0
+
+
+def test_run_reports_collection_errors_as_structured_error(tmp_path):
+    project = tmp_path / "broken-project"
+    project.mkdir()
+    (project / "test_broken.py").write_text("import module_that_does_not_exist\n", encoding="utf-8")
+    result = TestRunner(project).run()
+    assert result.error_code == "collection_interrupted"
+    assert result.errors == 1
+
+
+def test_successful_and_failing_runs_carry_no_error(sample_test_project):
+    result = TestRunner(sample_test_project).run()
+    assert result.failed == 1
+    assert result.error_code is None
+    assert result.error is None

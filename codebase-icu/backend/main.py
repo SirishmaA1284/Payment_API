@@ -11,10 +11,17 @@ to try a repair in.
 
 Configuration
 --------------
-The target repository/application this API inspects is configured via the
-``CODEBASE_ICU_TARGET_REPO`` environment variable. If unset, it defaults to
+The repository this API inspects can be selected at runtime with
+``POST /repository/configure`` (a local path to a Git repository, or a
+directory inside one). Until a repository is selected, the default target is
+used: the ``CODEBASE_ICU_TARGET_REPO`` environment variable if set, otherwise
 the sibling ``target-app`` directory (``../../target-app`` relative to this
 file), which is where the Payment API demo application lives.
+
+Every repository-dependent endpoint reads the *current* selection per
+request, so after a successful configure call, status/commits/diffs/file
+history, test runs, and sandboxes all operate on the newly selected
+repository.
 
 Sandbox worktrees are created against the top-level Git repository that
 contains the target path (discovered via ``git rev-parse --show-toplevel``),
@@ -24,8 +31,9 @@ of its own.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +44,8 @@ from .models import (
     CommitSummaryResponse,
     FailingTestResponse,
     FileHistoryEntryResponse,
+    RepositoryConfigureRequest,
+    RepositorySelectionResponse,
     RepositoryStatusResponse,
     SandboxCreateRequest,
     SandboxDeleteResponse,
@@ -44,6 +54,11 @@ from .models import (
     TestRunResponse,
 )
 from .services.git_analyzer import GitAnalyzer, GitCommandError, InvalidReferenceError
+from .services.repository_selection import (
+    RepositoryConfigurationError,
+    RepositorySelection,
+    SelectedRepository,
+)
 from .services.sandbox_manager import SandboxError, SandboxManager, SandboxNotFoundError
 from .services.test_runner import TestRunner
 
@@ -51,6 +66,9 @@ DEFAULT_TARGET_REPO = Path(__file__).resolve().parent.parent.parent / "target-ap
 TARGET_REPO_PATH = Path(
     os.environ.get("CODEBASE_ICU_TARGET_REPO", str(DEFAULT_TARGET_REPO))
 ).resolve()
+
+# The repository currently being analyzed; starts at TARGET_REPO_PATH.
+_selection = RepositorySelection(TARGET_REPO_PATH)
 
 app = FastAPI(
     title="Codebase ICU - Infrastructure API",
@@ -80,46 +98,58 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-_sandbox_manager: Optional[SandboxManager] = None
+# One manager per repository root, so switching repositories and back keeps
+# each repository's own sandbox bookkeeping (and the ability to clean up
+# sandboxes created there).
+_sandbox_managers: Dict[Path, SandboxManager] = {}
+_sandbox_managers_lock = threading.Lock()
+
+
+def _get_selected_repository() -> SelectedRepository:
+    try:
+        return _selection.current()
+    except RepositoryConfigurationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _get_git_analyzer() -> GitAnalyzer:
     try:
-        return GitAnalyzer(TARGET_REPO_PATH)
+        return GitAnalyzer(_get_selected_repository().path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _get_test_runner() -> TestRunner:
     try:
-        return TestRunner(TARGET_REPO_PATH)
+        return TestRunner(_get_selected_repository().path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-def _get_sandbox_manager() -> SandboxManager:
-    global _sandbox_manager
-    if _sandbox_manager is not None:
-        return _sandbox_manager
+def _get_sandbox_manager(selected: Optional[SelectedRepository] = None) -> SandboxManager:
+    repo_root = (selected or _get_selected_repository()).repo_root
+    with _sandbox_managers_lock:
+        manager = _sandbox_managers.get(repo_root)
+        if manager is None:
+            try:
+                manager = SandboxManager(repo_root)
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            _sandbox_managers[repo_root] = manager
+    return manager
+
+
+def _to_selection_response(selected: SelectedRepository) -> RepositorySelectionResponse:
     try:
-        repo_root = GitAnalyzer(TARGET_REPO_PATH).get_repo_root()
-        _sandbox_manager = SandboxManager(repo_root)
-    except (FileNotFoundError, GitCommandError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _sandbox_manager
-
-
-def _target_subpath_within_repo_root() -> str:
-    """Path of the target app relative to the repo root, e.g. "target-app".
-
-    A sandbox worktree mirrors the full repository at some commit, so the
-    target application lives at the same relative path inside the sandbox
-    as it does inside the main checkout - this is computed generically
-    rather than hard-coded, so it still works if the target repo path is
-    reconfigured.
-    """
-    repo_root = GitAnalyzer(TARGET_REPO_PATH).get_repo_root()
-    return os.path.relpath(TARGET_REPO_PATH, repo_root)
+        branch = GitAnalyzer(selected.path).get_status().branch
+    except (FileNotFoundError, GitCommandError):
+        branch = "unknown"
+    return RepositorySelectionResponse(
+        path=str(selected.path),
+        repo_root=str(selected.repo_root),
+        branch=branch,
+        is_default=selected.is_default,
+    )
 
 
 def _to_test_run_response(result) -> TestRunResponse:
@@ -137,12 +167,35 @@ def _to_test_run_response(result) -> TestRunResponse:
         parsed_successfully=result.parsed_successfully,
         stdout=result.stdout,
         stderr=result.stderr,
+        error_code=result.error_code,
+        error=result.error,
     )
 
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "codebase-icu-backend"}
+
+
+@app.get("/repository", response_model=RepositorySelectionResponse)
+def repository_current() -> RepositorySelectionResponse:
+    """The repository currently being analyzed (the default until one is configured)."""
+    return _to_selection_response(_get_selected_repository())
+
+
+@app.post("/repository/configure", response_model=RepositorySelectionResponse)
+def repository_configure(request: RepositoryConfigureRequest) -> RepositorySelectionResponse:
+    """Select the local Git repository every other endpoint operates on.
+
+    ``path`` is treated purely as a filesystem path: it must exist, be a
+    directory, and be inside a Git work tree whose root Git can resolve. On
+    failure the previously selected repository stays selected.
+    """
+    try:
+        selected = _selection.configure(request.path)
+    except RepositoryConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_selection_response(selected)
 
 
 @app.get("/repository/status", response_model=RepositoryStatusResponse)
@@ -267,7 +320,8 @@ def run_sandbox_tests(
     sandbox and never touches the main checkout, so both remain exactly as
     they were before the call.
     """
-    manager = _get_sandbox_manager()
+    selected = _get_selected_repository()
+    manager = _get_sandbox_manager(selected)
     try:
         info = manager.get_sandbox(sandbox_id)
     except SandboxNotFoundError as exc:
@@ -280,10 +334,11 @@ def run_sandbox_tests(
             detail=f"sandbox '{sandbox_id}' has no working directory on disk",
         )
 
+    # A sandbox mirrors the whole repository, so the selected project lives
+    # at the same relative path inside it as inside the main checkout.
     try:
-        target_subpath = _target_subpath_within_repo_root()
-        runner = TestRunner((sandbox_path / target_subpath).resolve())
-    except (FileNotFoundError, GitCommandError) as exc:
+        runner = TestRunner((sandbox_path / selected.subpath).resolve())
+    except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     result = runner.run(extra_args=request.extra_args)

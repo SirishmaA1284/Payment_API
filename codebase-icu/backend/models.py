@@ -6,6 +6,21 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+class RepositoryConfigureRequest(BaseModel):
+    path: str = Field(
+        ...,
+        max_length=4096,
+        description="Absolute path to a local Git repository (or a directory inside one)",
+    )
+
+
+class RepositorySelectionResponse(BaseModel):
+    path: str
+    repo_root: str
+    branch: str
+    is_default: bool
+
+
 class RepositoryStatusResponse(BaseModel):
     branch: str
     is_clean: bool
@@ -63,6 +78,10 @@ class TestRunResponse(BaseModel):
     parsed_successfully: bool
     stdout: str
     stderr: str
+    # Set when the suite could not produce a usable result (no tests found,
+    # pytest could not start, collection was interrupted, timeout).
+    error_code: Optional[str] = None
+    error: Optional[str] = None
 
 
 class SandboxCreateRequest(BaseModel):

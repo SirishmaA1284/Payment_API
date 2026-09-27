@@ -57,6 +57,18 @@ function withQuery(path, params) {
 export const api = {
   health: () => request('/health'),
 
+  // The repository the backend currently analyzes (its default until one
+  // is configured).
+  currentRepository: () => request('/repository'),
+
+  // Select the local Git repository every other call operates on. The
+  // backend validates the path; only the path itself is sent.
+  configureRepository: (path) =>
+    request('/repository/configure', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
   repositoryStatus: () => request('/repository/status'),
 
   repositoryCommits: ({ limit = 20, branch } = {}) =>

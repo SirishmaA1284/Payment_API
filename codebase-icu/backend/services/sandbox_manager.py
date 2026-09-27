@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -56,11 +57,20 @@ class SandboxManager:
                 f"'{self.repo_path}' is not a Git repository root (no .git directory)"
             )
 
-        self.sandbox_root = (
-            Path(sandbox_root).resolve()
-            if sandbox_root is not None
-            else self.repo_path.parent / ".codebase-icu-sandboxes"
-        )
+        if sandbox_root is not None:
+            self.sandbox_root = Path(sandbox_root).resolve()
+        elif self.repo_path.parent != self.repo_path:
+            self.sandbox_root = self.repo_path.parent / ".codebase-icu-sandboxes"
+        else:
+            # Repository at a filesystem root (e.g. D:\) has no parent to put
+            # sandboxes next to; use a per-repository temp directory instead.
+            self.sandbox_root = (
+                Path(tempfile.gettempdir()) / "codebase-icu-sandboxes" / uuid.uuid5(
+                    uuid.NAMESPACE_URL, str(self.repo_path)
+                ).hex[:12]
+            )
+        if self.sandbox_root == self.repo_path or self.repo_path in self.sandbox_root.parents:
+            raise ValueError("sandbox root must be outside the source repository")
         self.sandbox_root.mkdir(parents=True, exist_ok=True)
 
         self._sandboxes: Dict[str, SandboxInfo] = {}

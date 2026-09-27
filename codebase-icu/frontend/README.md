@@ -82,12 +82,13 @@ frontend/
 │   ├── components/     one component per dashboard panel/stage
 │   ├── services/
 │   │   └── api.js       thin fetch wrapper around the backend - no
-│   │                     backend logic is duplicated here
+│   │                     backend logic is duplicated here (+ api.test.js)
 │   ├── config/
 │   │   └── demo.js       clearly-labeled demo identifiers/configuration
 │   │                     used by the dashboard (see below)
 │   ├── utils/            pure helpers (diff parsing, failure-reason
-│   │                     parsing) with small vitest unit tests
+│   │                     parsing, repository selection) with small
+│   │                     vitest unit tests
 │   ├── App.jsx           orchestrates the "Run Recovery Analysis" flow
 │   ├── main.jsx          React entry point
 │   └── styles.css        the entire visual design (plain CSS, no framework)
@@ -125,15 +126,42 @@ The repair sandbox itself is a Git worktree IBM Bob created directly with
 `git worktree`, checked out on its own branch and deliberately isolated from
 `main` — `main` is never modified by, or merged with, that repair.
 
+## Choosing the repository to analyze
+
+The **Repository** field at the top of the dashboard holds the local Git
+repository to analyze, e.g. `D:\CodebaseICU-Validation\repo-1`. On load it
+is prefilled from `GET /repository` with the backend's current selection,
+which is the Payment API demo until you change it. The line under the field
+shows the repository the backend has actually selected and its branch.
+
+The repository must be a local Git repository with a runnable pytest suite
+for full recovery verification. The backend validates the path; the
+dashboard only rejects an empty field (`src/utils/repository.js`). Repairs
+are only tried in isolated worktrees and are never merged into the source
+repository automatically — see the backend
+[README](../README.md#analyzing-your-own-repository).
+
+IBM Bob's investigation/repair evidence (`src/config/demo.js`) belongs to
+the Payment API demo, so it is shown only while the demo repository is
+selected (`is_default` in the backend's response). For any other repository
+the dashboard shows that repository's live test results and a notice that no
+Bob investigation is recorded for it.
+
 ## Demo workflow
 
-Clicking **RUN RECOVERY ANALYSIS**:
+Clicking **RUN RECOVERY ANALYSIS** (or pressing Enter in the Repository
+field):
 
 1. Checks the backend is reachable (`GET /health`) and updates the
    connection indicator.
-2. Loads repository status (`GET /repository/status`).
-3. Runs the target application's test suite on `main` (`POST /tests/run`)
-   and renders the failing tests.
+2. Sends the entered path to `POST /repository/configure`. If the backend
+   rejects it, the reason is shown under the field and the analysis stops
+   here; nothing else runs. Selecting a different repository clears the
+   previous repository's results.
+3. Loads repository status (`GET /repository/status`), then runs the
+   selected repository's test suite (`POST /tests/run`) and renders the
+   failing tests, or the backend's structured error if the suite could not
+   run. For a repository other than the demo, the analysis ends here.
 4. Loads the root-cause commit's metadata and diff.
 5. Loads the repair commit's metadata and diff.
 6. Loads the repair sandbox's information (`GET /sandbox/{sandbox_id}`).
@@ -147,6 +175,11 @@ banner rather than crashing the whole page.
 
 ## Error handling
 
+- **Invalid repository path** (missing, not a directory, not a Git
+  repository, relative): the backend's reason is shown under the Repository
+  field, the analysis does not start, and the previous selection stays.
+- **Tests cannot run** (no tests, collection errors, timeout): the Failure
+  panel shows the backend's `error` instead of a pass/fail count.
 - **Backend unreachable**: the header shows "○ Backend Offline" and running
   the analysis shows a banner explaining how to start the backend.
 - **Invalid/unknown Git reference**: the relevant panel shows the backend's
@@ -188,6 +221,6 @@ dashboard stays usable on a smaller laptop screen. Mobile is not a target.
 ## Testing
 
 ```bash
-npm run test    # vitest — unit tests for the pure diff/test-result parsers
+npm run test    # vitest — diff/test-result parsers, repository selection, API client
 npm run build   # must succeed; also the most useful smoke test for JSX/import errors
 ```

@@ -675,3 +675,49 @@ code.mono {
     overflow-x: auto;
   }
 }
+
+/* Repository selection */
+
+.repository-input {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 22px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.repository-input__label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.repository-input__field {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 12px;
+}
+
+.repository-input__field:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.repository-input__field:disabled {
+  opacity: 0.6;
+}
+
+.repository-input__selected {
+  font-size: 12px;
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}

@@ -82,13 +82,16 @@ codebase-icu/
 │       ├── __init__.py
 │       ├── git_analyzer.py      # safe subprocess wrapper around git
 │       ├── test_runner.py       # runs & parses pytest output
-│       └── sandbox_manager.py   # isolated git worktrees
+│       ├── sandbox_manager.py   # isolated git worktrees
+│       └── repository_selection.py  # runtime choice of the analyzed repository
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py              # temp-repo / temp-project fixtures
 │   ├── test_git_analyzer.py
 │   ├── test_test_runner.py
-│   └── test_sandbox_manager.py
+│   ├── test_sandbox_manager.py
+│   ├── test_main_api.py
+│   └── test_repository_selection.py
 ├── frontend/                    # dashboard - see frontend/README.md
 │   ├── src/
 │   │   ├── components/          # one component per dashboard panel/stage
@@ -121,9 +124,50 @@ pytest`), so it needs the target app's runtime dependencies too. In this
 repo those happen to be a subset of `codebase-icu/requirements.txt`
 (fastapi, pydantic, httpx, pytest), so no extra installs are required.
 
+## Analyzing your own repository
+
+Codebase ICU can analyze **any local Git repository you supply at runtime**,
+not only the Payment API demo.
+
+1. Start the stack (see [Running the full stack](#running-the-full-stack-backend--dashboard)).
+2. In the dashboard, enter the repository's full local path in the
+   **Repository** field at the top, e.g. `D:\CodebaseICU-Validation\repo-1`.
+   The field is prefilled with the repository currently selected (the
+   Payment API demo until you change it).
+3. Click **RUN RECOVERY ANALYSIS** (or press Enter in the field). The
+   dashboard first sends the path to `POST /repository/configure`; only if
+   the backend accepts it does the analysis run, against that repository.
+   If the path is rejected, the reason is shown under the field and nothing
+   else runs.
+
+Requirements for the repository:
+
+- It must be a **local Git repository** (or a directory inside one — tests
+  then run from that directory, like the demo's `target-app/`).
+- For full recovery verification it needs a **runnable pytest suite** whose
+  dependencies are installed in the backend's virtual environment (see
+  [Setup](#setup)). If no tests are found or they cannot run, `POST
+  /tests/run` returns a structured `error_code`/`error` instead of guessing.
+
+Repairs are only ever tried in **isolated worktrees**: a sandbox is created
+outside the selected repository, on its own `codebase-icu/sandbox-<id>`
+branch, and is **never merged automatically** into the source repository's
+branches — merging a repair is always your decision.
+
+IBM Bob's recorded investigation and repair evidence (root-cause commit,
+repair commit, repair sandbox — see `frontend/src/config/demo.js`) belong
+to the Payment API demo. For any other repository the dashboard shows live
+test results and states that no Bob investigation is recorded, rather than
+showing the demo's evidence.
+
+The selection is held in backend memory: restarting the backend returns to
+the default repository.
+
 ## Configuration
 
-The backend inspects one configurable **target repository path**:
+The backend starts out inspecting one configurable **default target
+repository path** (used until a repository is selected at runtime, as
+described above):
 
 | Variable                    | Default                                  | Meaning                                   |
 |------------------------------|-------------------------------------------|--------------------------------------------|
@@ -142,9 +186,10 @@ Sandboxes are created under `<repo-root's parent>/.codebase-icu-sandboxes/`
 so sandbox activity never shows up as changes in the main repo's `git
 status`.
 
-To point the backend at a different repository entirely, set
-`CODEBASE_ICU_TARGET_REPO` to that repository's path (or a subdirectory of
-it) before starting uvicorn.
+To point the backend at a different repository without using the
+dashboard, either call `POST /repository/configure` with `{"path": "..."}`,
+or set `CODEBASE_ICU_TARGET_REPO` to that repository's path (or a
+subdirectory of it) before starting uvicorn to change the default.
 
 The backend also allows one cross-origin config for the dashboard:
 
@@ -193,6 +238,8 @@ configuration, and demo workflow in detail.
 | Method | Path                                   | Description                                              |
 |--------|-----------------------------------------|------------------------------------------------------------|
 | GET    | `/health`                               | Liveness check                                             |
+| GET    | `/repository`                           | The repository currently analyzed: `path`, `repo_root`, `branch`, `is_default` |
+| POST   | `/repository/configure`                 | Select the repository to analyze - body `{"path": "<absolute local path>"}`; same response shape as `GET /repository` |
 | GET    | `/repository/status`                    | Current branch, clean/dirty state, changed files           |
 | GET    | `/repository/commits?limit=&branch=`    | Recent commit summaries, newest first                      |
 | GET    | `/repository/commits/{commit_hash}`     | Commit metadata, parent(s), changed files, stat summary     |
@@ -202,14 +249,21 @@ configuration, and demo workflow in detail.
 | POST   | `/sandbox/create`                       | Create an isolated Git worktree based on a ref (default `HEAD`) |
 | GET    | `/sandbox/{sandbox_id}`                 | Sandbox path, branch, source commit, status                 |
 | DELETE | `/sandbox/{sandbox_id}`                 | Remove a sandbox's worktree and throwaway branch             |
+| POST   | `/sandbox/{sandbox_id}/tests`           | Run the test suite inside a sandbox's own working directory |
+
+Every endpoint except `/health` and `/repository/configure` operates on the
+**currently selected** repository, read per request.
 
 File paths (`file-history`'s `path`, and the `changed_files` in status/commit
-responses) are relative to the configured target repository path
-(`CODEBASE_ICU_TARGET_REPO`), e.g. `app/auth.py`, not `target-app/app/auth.py`.
+responses) are relative to the selected repository path, e.g. for the demo
+`app/auth.py`, not `target-app/app/auth.py`.
 
 ### Error handling
 
-- Unknown/missing repository path → `404`
+- `POST /repository/configure` with a path that is empty, relative, missing,
+  not a directory, or not inside a Git work tree → `400` with the reason; the
+  previously selected repository stays selected
+- Default repository path missing/invalid → `404`
 - Invalid or unknown commit/branch reference → `400` (malformed reference) or `404` (well-formed but unknown)
 - A failing Git subprocess call → `500` with the command's stderr (no secrets or environment variables are ever included)
 - Unknown sandbox id → `404`
@@ -254,6 +308,20 @@ summary line can't be parsed for any reason, `parsed_successfully` is
 `False` but the raw `stdout`/`stderr` are still returned so a caller (or a
 human) can inspect what happened.
 
+When a run produces no usable result, the response also carries
+`error_code` and a readable `error` (both `null` otherwise):
+
+| `error_code`             | Meaning                                                    |
+|---------------------------|-------------------------------------------------------------|
+| `no_tests`                | pytest collected no tests (the repository has no suite)     |
+| `collection_interrupted`  | collection failed, e.g. a test module's import error        |
+| `tests_could_not_run`     | pytest failed to start or exited without a summary          |
+| `timeout`                 | the suite exceeded the runner's timeout                     |
+
+Tests always run in the selected repository's directory (for `/tests/run`)
+or the same relative directory inside the sandbox (for
+`/sandbox/{sandbox_id}/tests`) — never in the other one.
+
 ## How the Sandbox works
 
 `backend/services/sandbox_manager.py` creates a `git worktree` — a second,
@@ -271,9 +339,26 @@ pushes a sandbox's changes anywhere — that remains a decision for a later,
 explicit step in the product, not something this infrastructure does on its
 own.
 
+Each selected repository gets its own sandbox manager, keyed by repository
+root: sandboxes are looked up only among that repository's worktrees, and
+switching back to a repository restores access to (and cleanup of) the
+sandboxes created there. If a repository sits at a filesystem root (so has
+no parent directory to hold `.codebase-icu-sandboxes/`), sandboxes go under
+the system temp directory instead; a sandbox root inside the source
+repository is refused.
+
 ## Security / safety considerations
 
 - No `shell=True` anywhere; all subprocess calls use argv lists.
+- The repository path submitted to `/repository/configure` is treated only
+  as a filesystem path: it must be absolute, exist, be a directory, and be
+  inside a Git work tree whose root `git rev-parse --show-toplevel` resolves.
+  The API accepts no Git commands or arguments from the client, and its
+  responses return only the path, repository root and branch — never file
+  contents, `.env` values, or environment variables.
+- Running a repository's tests executes that repository's code (its test
+  modules, `conftest.py`, etc.) with the backend's privileges. Only select
+  repositories you trust.
 - Git references and file paths are validated before being passed to `git`.
 - The sandbox manager refuses to delete the source repository or anything
   outside its own sandbox root, even if asked to (`_assert_safe_to_delete`).
@@ -304,11 +389,19 @@ disturb the target application or its Git history.
 
 ```bash
 cd codebase-icu/frontend
-npm run test    # vitest unit tests for the pure diff/test-result parsers
+npm run test    # vitest unit tests: diff/test-result parsers, repository selection, API client
 npm run build   # production build - also the main JSX/import smoke test
 ```
 
 ## Known limitations
+
+- The runtime repository selection is held in memory and is global to the
+  backend process (one selection shared by every dashboard tab); restarting
+  the backend returns to the default repository.
+- Tests run with the backend's own Python interpreter, so a selected
+  repository's test dependencies must be installed in `codebase-icu/.venv`;
+  otherwise `/tests/run` reports `collection_interrupted` /
+  `tests_could_not_run`. Only pytest suites are supported.
 
 - Sandbox bookkeeping (`SandboxManager._sandboxes`) is in-memory only and
   scoped to one `SandboxManager` instance/process; restarting the backend
